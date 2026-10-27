@@ -5,63 +5,96 @@
 namespace asio = boost::asio;
 using asio::ip::tcp;
 
+namespace
+{
+	// 한 줄의 최대 길이. 서버가 이보다 길게 '\n' 없이 보내면 연결을 끊는다.
+	constexpr std::size_t maxLineLength = 4096;
+}
+
 Session::Session(tcp::socket socket)
 	: m_socket(std::move(socket))
 {
 }
 
-void Session::run()
+void Session::start()
 {
-	std::string line;
-	while (std::cout << "> " && std::getline(std::cin, line) && !line.empty()) {
-		// 1. 입력한 줄을 서버로 보낸다.
-		if (!send(line)) {
-			break;
-		}
-
-		// 2. echo 서버라서 보낸 길이만큼 돌아온다는 걸 알고 있다.
-		std::string reply;
-		if (!receive(reply, line.size())) {
-			break;
-		}
-
-		std::cout << "Echo: " << reply << '\n';
-	}
-
-	// 3. 종료: 서버는 read에서 eof를 받는다.
-	close();
+	startRead();
 }
 
-bool Session::send(const std::string& data)
+void Session::send(std::string data)
 {
-	// asio::write: 지정한 바이트를 전부 보낼 때까지 blocking.
-	boost::system::error_code ec;
-	asio::write(m_socket, asio::buffer(data), ec);
-	if (ec) {
-		std::cerr << "Write error: " << ec.message() << '\n';
-		return false;
+	if (m_closed) {
+		return;
 	}
-	return true;
-}
 
-bool Session::receive(std::string& data, std::size_t length)
-{
-	// asio::read: 버퍼가 가득 찰 때까지 여러 번 나눠 받아서라도 기다린다.
-	// (read_some은 조금이라도 오면 바로 돌아오므로, 길이를 알 때는 read를 쓴다.)
-	boost::system::error_code ec;
-	data.resize(length);
-	asio::read(m_socket, asio::buffer(data), ec);
-	if (ec) {
-		std::cerr << "Read error: " << ec.message() << '\n';
-		return false;
+	// 이미 보내는 중이면 큐에만 쌓고, onWrite가 이어서 보낸다.
+	const bool writing = !m_writeQueue.empty();
+	m_writeQueue.push_back(std::move(data));
+	if (!writing) {
+		startWrite();
 	}
-	return true;
 }
 
 void Session::close()
 {
+	if (m_closed.exchange(true)) {
+		return;
+	}
+
+	// 서버는 read에서 eof를 받는다. 걸려 있던 작업은 operation_aborted로 끝난다.
 	boost::system::error_code ec;
 	m_socket.shutdown(tcp::socket::shutdown_both, ec);
 	m_socket.close(ec);
-	std::cout << "Disconnected\n";
+}
+
+void Session::startRead()
+{
+	asio::async_read_until(m_socket, asio::dynamic_buffer(m_readBuffer, maxLineLength), '\n',
+		[self = shared_from_this()](const boost::system::error_code& ec, std::size_t length) {
+			self->onRead(ec, length);
+		});
+}
+
+void Session::onRead(const boost::system::error_code& ec, std::size_t length)
+{
+	if (ec) {
+		if (ec == asio::error::eof) {
+			std::cout << "Server closed the connection (press Enter to exit)\n";
+		}
+		else if (ec != asio::error::operation_aborted) {
+			std::cerr << "Read error: " << ec.message() << '\n';
+		}
+		close();
+		return;
+	}
+
+	// 한 줄을 꺼내 출력하고('\n' 포함), 바로 다음 줄을 기다린다.
+	std::cout << m_readBuffer.substr(0, length) << std::flush;
+	m_readBuffer.erase(0, length);
+
+	startRead();
+}
+
+void Session::startWrite()
+{
+	asio::async_write(m_socket, asio::buffer(m_writeQueue.front()),
+		[self = shared_from_this()](const boost::system::error_code& ec, std::size_t length) {
+			self->onWrite(ec, length);
+		});
+}
+
+void Session::onWrite(const boost::system::error_code& ec, std::size_t)
+{
+	if (ec) {
+		if (ec != asio::error::operation_aborted) {
+			std::cerr << "Write error: " << ec.message() << '\n';
+		}
+		close();
+		return;
+	}
+
+	m_writeQueue.pop_front();
+	if (!m_writeQueue.empty()) {
+		startWrite();
+	}
 }
