@@ -57,13 +57,43 @@ bool Listener::open()
 	return true;
 }
 
-bool Listener::accept(tcp::socket& socket)
+void Listener::start(AcceptHandler onAccept)
+{
+	m_onAccept = std::move(onAccept);
+	startAccept();
+}
+
+void Listener::close()
 {
 	boost::system::error_code ec;
-	m_acceptor.accept(socket, ec);
-	if (ec) {
-		std::cerr << "Failed to accept: " << ec.message() << '\n';
-		return false;
+	m_acceptor.close(ec);
+}
+
+void Listener::startAccept()
+{
+	// async_accept: 접속을 기다리지 않고 바로 반환한다.
+	// 접속이 오면 io_context가 이 람다를 호출하고, 새로 만들어진 socket을 넘겨준다.
+	// Listener는 main에서 io_context.run()보다 오래 살아 있으므로 this를 그대로 잡아도 안전하다.
+	m_acceptor.async_accept([this](const boost::system::error_code& ec, tcp::socket socket) {
+		onAccept(ec, std::move(socket));
+	});
+}
+
+void Listener::onAccept(const boost::system::error_code& ec, tcp::socket socket)
+{
+	if (ec == asio::error::operation_aborted) {
+		// close()로 acceptor가 닫혔다. 더 이상 접속을 받지 않는다.
+		return;
 	}
-	return true;
+
+	if (ec) {
+		// 접속 하나가 실패해도 서버는 계속 접속을 받는다.
+		std::cerr << "Failed to accept: " << ec.message() << '\n';
+	}
+	else {
+		m_onAccept(std::move(socket));
+	}
+
+	// 다음 접속을 기다린다. 이렇게 콜백 안에서 다시 요청해야 접속을 계속 받을 수 있다.
+	startAccept();
 }
