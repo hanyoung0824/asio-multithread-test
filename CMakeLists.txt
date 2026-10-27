@@ -18,4 +18,5 @@ if(MSVC)
 	add_compile_options(/utf-8)
 endif()
 
-add_subdirectory(step01_sync_echo)
+add_subdirectory(server)
+add_subdirectory(client)
