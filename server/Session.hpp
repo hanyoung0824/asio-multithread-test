@@ -1,37 +1,49 @@
 #pragma once
 
-#include "SessionManager.hpp"
-
 #include <boost/asio.hpp>
 
+#include <cstdint>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <string>
 
-// 접속한 클라이언트 하나와 데이터를 주고받는 역할.
-// 받은 줄('\n'로 끝나는 메시지)을 SessionManager를 통해 모든 클라이언트에게 보낸다(broadcast).
+// 접속한 클라이언트 하나와 데이터를 주고받는 역할 (소켓 I/O만 담당).
+// 받은 줄을 어떻게 처리할지, 닫혔을 때 무엇을 할지는 모른다. 생성할 때 받은 콜백으로 알리기만 한다.
 //
 // 읽기와 쓰기는 서로 독립적으로 진행된다.
-// - 읽기: 항상 하나가 걸려 있다. 한 줄을 받으면 처리하고 바로 다음 읽기를 건다.
+// - 읽기: 항상 하나가 걸려 있다. 한 줄을 받으면 콜백으로 넘기고 바로 다음 읽기를 건다.
 // - 쓰기: send()로 들어온 데이터를 큐에 쌓고, async_write는 한 번에 하나씩만 진행한다.
 //
 // 비동기 작업이 끝나기 전에 Session이 사라지면 안 되므로 반드시 std::make_shared로 만든다.
-// SessionManager 목록과, 진행 중인 비동기 작업의 콜백이 shared_ptr로 Session을 붙잡고 있다.
+// 세션 목록과, 진행 중인 비동기 작업의 콜백이 shared_ptr로 Session을 붙잡고 있다.
 class Session : public std::enable_shared_from_this<Session>
 {
 public:
-	Session(boost::asio::ip::tcp::socket socket, SessionManager& manager);
+	using SessionId = std::uint64_t;
+
+	// 한 줄을 받았을 때 호출된다 (line에 '\n'은 포함되지 않는다).
+	using MessageCallback = std::function<void(const std::shared_ptr<Session>& session, std::string line)>;
+
+	// 연결이 닫혔을 때 호출된다.
+	using CloseCallback = std::function<void(SessionId id)>;
+
+public:
+	Session(boost::asio::ip::tcp::socket socket, SessionId id, MessageCallback onMessage, CloseCallback onClosed);
 	~Session();
 
-	// 목록에 등록하고 읽기를 시작한다. 바로 반환하고, 이후는 콜백으로 진행된다.
+	// 읽기를 시작한다. 바로 반환하고, 이후는 콜백으로 진행된다.
 	void start();
 
 	// data를 보낸다. 바로 반환하고, 실제 전송은 쓰기 큐를 통해 차례로 진행된다.
 	// 여러 세션이 같은 data를 공유할 수 있도록 shared_ptr로 받는다 (보내는 동안 살아 있어야 한다).
 	void send(std::shared_ptr<const std::string> data);
 
-	// 연결을 닫고 목록에서 뺀다. 여러 번 호출해도 된다.
+	// 연결을 닫고 onClosed 콜백으로 알린다. 여러 번 호출해도 된다.
 	void close();
+
+	SessionId getId() const { return m_id; }
+	const std::string& getName() const { return m_name; }
 
 private:
 	// 한 줄('\n'까지)이 오기를 비동기로 기다린다.
@@ -48,10 +60,12 @@ private:
 
 private:
 	boost::asio::ip::tcp::socket m_socket; // 이 클라이언트 전용 소켓
-	SessionManager& m_manager; // 세션 목록 (broadcast, 목록에서 빼기)
-	SessionManager::SessionId m_id = 0; // 목록에서 받은 ID
+	const SessionId m_id; // 세션 ID
 	std::string m_name; // "IP:포트" (로그, 메시지 앞머리용)
 	bool m_closed = false; // close()가 이미 호출됐는지
+
+	MessageCallback m_onMessage; // 한 줄을 받았을 때
+	CloseCallback m_onClosed; // 연결이 닫혔을 때
 
 	std::string m_readBuffer; // 받은 데이터. 한 줄을 꺼내고 남은 것은 다음 읽기에 이어서 쓴다.
 	std::deque<std::shared_ptr<const std::string>> m_writeQueue; // 보낼 데이터. 맨 앞이 지금 보내는 중인 것.

@@ -6,5 +6,7 @@ add_executable(server
 	Session.cpp
 	SessionManager.hpp
 	SessionManager.cpp
+	PacketHandler.hpp
+	PacketHandler.cpp
 )
 target_link_libraries(server PRIVATE Boost::asio Threads::Threads)

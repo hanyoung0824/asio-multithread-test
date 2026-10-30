@@ -14,9 +14,11 @@ namespace
 	constexpr std::size_t maxLineLength = 1024;
 }
 
-Session::Session(tcp::socket socket, SessionManager& manager)
+Session::Session(tcp::socket socket, SessionId id, MessageCallback onMessage, CloseCallback onClosed)
 	: m_socket(std::move(socket)),
-	m_manager(manager)
+	m_id(id),
+	m_onMessage(std::move(onMessage)),
+	m_onClosed(std::move(onClosed))
 {
 	boost::system::error_code ec;
 	std::ostringstream name;
@@ -33,9 +35,6 @@ Session::~Session()
 void Session::start()
 {
 	std::cout << "[thread " << std::this_thread::get_id() << "] Client connected: " << m_name << '\n';
-
-	// 생성자에서는 shared_from_this()를 쓸 수 없으므로 목록 등록은 여기서 한다.
-	m_id = m_manager.add(shared_from_this());
 	startRead();
 }
 
@@ -68,8 +67,10 @@ void Session::close()
 	m_socket.shutdown(tcp::socket::shutdown_both, ec);
 	m_socket.close(ec);
 
-	// 목록에서 빠진다. 남은 콜백들이 끝나면 Session이 소멸한다.
-	m_manager.remove(m_id);
+	// 닫혔다고 알린다 (목록에서 빠진다). 남은 콜백들이 끝나면 Session이 소멸한다.
+	if (m_onClosed) {
+		m_onClosed(m_id);
+	}
 }
 
 void Session::startRead()
@@ -100,16 +101,18 @@ void Session::onRead(const boost::system::error_code& ec, std::size_t length)
 	}
 
 	// 1. 버퍼에서 한 줄을 꺼낸다 ('\n' 제외). '\n' 뒤에 더 받은 데이터는 버퍼에 남겨 다음 줄로 쓴다.
-	const std::string line = m_readBuffer.substr(0, length - 1);
+	std::string line = m_readBuffer.substr(0, length - 1);
 	m_readBuffer.erase(0, length);
 
-	std::cout << "[thread " << std::this_thread::get_id() << "] " << m_name << ": " << line << '\n';
+	// 2. 처리는 콜백에 맡긴다. 무엇을 할지는 Session이 모른다.
+	if (m_onMessage) {
+		m_onMessage(shared_from_this(), std::move(line));
+	}
 
-	// 2. 모든 클라이언트에게 보낸다. 메시지는 한 번만 만들고 모든 세션이 공유한다.
-	m_manager.broadcast(std::make_shared<const std::string>("[" + m_name + "] " + line + "\n"));
-
-	// 3. 쓰기가 끝나기를 기다리지 않고 바로 다음 줄을 받는다.
-	startRead();
+	// 3. 처리 중에 닫히지 않았으면 바로 다음 줄을 받는다.
+	if (!m_closed) {
+		startRead();
+	}
 }
 
 void Session::startWrite()
