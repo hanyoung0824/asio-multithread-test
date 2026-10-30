@@ -2,13 +2,11 @@
 
 #include <limits>
 
-PacketWriter::PacketWriter(PacketType type)
+PacketWriter::PacketWriter(std::uint16_t id)
 {
 	// size는 finish()에서 채운다. 우선 0으로 자리만 잡는다.
-	m_buffer.resize(packetHeaderSize);
-	const auto typeValue = static_cast<std::uint16_t>(type);
-	m_buffer[2] = static_cast<std::uint8_t>(typeValue & 0xFF);
-	m_buffer[3] = static_cast<std::uint8_t>(typeValue >> 8);
+	m_buffer.resize(2);
+	writeUInt16(id);
 }
 
 void PacketWriter::writeUInt16(std::uint16_t value)

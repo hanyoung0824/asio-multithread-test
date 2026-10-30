@@ -5,11 +5,12 @@
 // 역할 분리:
 // - Listener: 접속을 받는다.
 // - SessionManager: 세션을 만들고 목록을 관리한다.
-// - Session: 클라이언트 하나와 패킷을 주고받는다.
-// - PacketHandler: 세션이 받은 패킷을 처리한다.
+// - Session: 클라이언트 하나와 바이트를 주고받는다 (범용, 패킷 형식은 모른다).
+// - PacketSession: Session을 상속해 받은 바이트를 패킷으로 잘라 id로 등록된 패킷 클래스(packets/)로 넘긴다.
 
 #include "Listener.hpp"
-#include "PacketHandler.hpp"
+#include "packets/RegisterPackets.hpp"
+#include "PacketSession.hpp"
 #include "Session.hpp"
 #include "SessionManager.hpp"
 
@@ -18,7 +19,6 @@
 #include <csignal>
 #include <iostream>
 #include <memory>
-#include <string>
 #include <thread>
 
 namespace asio = boost::asio;
@@ -32,24 +32,28 @@ int main()
 	// 비동기 작업이 끝나면 그 콜백을 io_context가 실행한다.
 	asio::io_context ioContext;
 
-	// 2. 받은 패킷 처리 연결: 세션이 받은 패킷은 PacketHandler가 처리한다.
-	// SessionManager가 PacketHandler를 직접 알지 않도록 여기서 연결해 준다.
-	SessionManager::instance().setPacketHandler([](const std::shared_ptr<Session>& session, PacketType type, PacketReader& reader) {
-		PacketHandler::instance().handle(session, type, reader);
-	});
+	// 2. 패킷 클래스 등록 (목록은 packets/RegisterPackets.cpp)
+	registerPackets();
 
-	// 3. 서버 소켓 열기: open -> 옵션 -> bind -> listen
+	// 3. 세션 생성 방식 등록: 접속마다 이 프로젝트의 패킷 형식을 아는 PacketSession을 만든다.
+	// 네트워크 계층(Session, SessionManager)이 패킷 형식을 모르도록 여기서 연결해 준다.
+	SessionManager::instance().setSessionFactory(
+		[](tcp::socket socket, Session::SessionId id, Session::CloseCallback onClosed) -> std::shared_ptr<Session> {
+			return std::make_shared<PacketSession>(std::move(socket), id, std::move(onClosed));
+		});
+
+	// 4. 서버 소켓 열기: open -> 옵션 -> bind -> listen
 	Listener listener(ioContext, tcp::endpoint(tcp::v4(), port));
 	if (!listener.open()) {
 		return 1;
 	}
 
-	// 4. 접속 받기 시작: 접속이 올 때마다 SessionManager가 세션을 만들어 목록에 넣고 시작시킨다.
+	// 5. 접속 받기 시작: 접속이 올 때마다 SessionManager가 세션을 만들어 목록에 넣고 시작시킨다.
 	listener.start([](tcp::socket socket) {
 		SessionManager::instance().create(std::move(socket));
 	});
 
-	// 5. 종료 처리: Ctrl+C(SIGINT) 또는 SIGTERM을 비동기로 기다린다.
+	// 6. 종료 처리: Ctrl+C(SIGINT) 또는 SIGTERM을 비동기로 기다린다.
 	// 새 접속을 막고 모든 세션을 닫는다. 그러면 걸려 있던 작업들이 취소되어 끝나고,
 	// 할 일이 없어진 io_context.run()이 스스로 반환한다 (stop()으로 강제로 멈추지 않는다).
 	asio::signal_set signals(ioContext, SIGINT, SIGTERM);
@@ -64,7 +68,7 @@ int main()
 
 	std::cout << "[thread " << std::this_thread::get_id() << "] Chat server listening on " << listener.getEndPoint() << '\n';
 
-	// 6. 이벤트 루프: 완료된 비동기 작업의 콜백을 이 스레드에서 차례로 실행한다.
+	// 7. 이벤트 루프: 완료된 비동기 작업의 콜백을 이 스레드에서 차례로 실행한다.
 	// 살아 있는 세션은 항상 읽기를 걸어 두므로, run()이 반환했다면 세션 목록은 이미 비어 있다.
 	// (세션 목록은 싱글톤이라 main()이 끝난 뒤, 즉 io_context보다 늦게 소멸한다.)
 	ioContext.run();

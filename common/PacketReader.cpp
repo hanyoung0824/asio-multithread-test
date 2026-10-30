@@ -1,7 +1,7 @@
 #include "PacketReader.hpp"
 
-PacketReader::PacketReader(std::span<const std::uint8_t> body)
-	: m_body(body)
+PacketReader::PacketReader(std::span<const std::uint8_t> data)
+	: m_data(data)
 {
 }
 
@@ -12,7 +12,7 @@ bool PacketReader::readUInt16(std::uint16_t& out)
 	}
 
 	// little-endian: 낮은 바이트가 먼저 온다.
-	out = static_cast<std::uint16_t>(m_body[m_position] | (m_body[m_position + 1] << 8));
+	out = static_cast<std::uint16_t>(m_data[m_position] | (m_data[m_position + 1] << 8));
 	m_position += 2;
 	return true;
 }
@@ -24,7 +24,7 @@ bool PacketReader::readString(std::string& out)
 		return false;
 	}
 
-	const auto begin = m_body.begin() + m_position;
+	const auto begin = m_data.begin() + m_position;
 	out.assign(begin, begin + length);
 	m_position += length;
 	return true;

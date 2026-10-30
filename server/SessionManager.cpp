@@ -10,17 +10,23 @@ SessionManager& SessionManager::instance()
 	return instance;
 }
 
-void SessionManager::setPacketHandler(Session::PacketCallback handler)
+void SessionManager::setSessionFactory(SessionFactory factory)
 {
-	m_packetHandler = std::move(handler);
+	m_sessionFactory = std::move(factory);
 }
 
 void SessionManager::create(boost::asio::ip::tcp::socket socket)
 {
+	if (!m_sessionFactory) {
+		// 등록을 빠뜨린 경우. socket은 여기서 소멸하며 연결이 닫힌다.
+		std::cerr << "No session factory registered, connection dropped\n";
+		return;
+	}
+
 	// 1. 새 ID로 세션을 만든다. 닫히면 목록에서 빠지도록 remove를 연결한다.
 	// 싱글톤은 프로그램이 끝날 때까지 살아 있으므로 this를 캡처해도 안전하다.
 	const Session::SessionId id = m_nextId++;
-	auto session = std::make_shared<Session>(std::move(socket), id, m_packetHandler,
+	std::shared_ptr<Session> session = m_sessionFactory(std::move(socket), id,
 		[this](Session::SessionId closedId) { remove(closedId); });
 
 	// 2. 목록에 넣는다.
@@ -38,12 +44,12 @@ void SessionManager::remove(Session::SessionId id)
 	}
 }
 
-void SessionManager::broadcast(const std::shared_ptr<const PacketBuffer>& packet)
+void SessionManager::broadcast(const std::shared_ptr<const Session::Buffer>& data)
 {
 	// Session::send()는 큐에 넣고 바로 반환하며 그 자리에서 close()하지 않으므로,
 	// 순회하는 동안 목록이 바뀌지 않는다.
 	for (const auto& [id, session] : m_sessions) {
-		session->send(packet);
+		session->send(data);
 	}
 }
 

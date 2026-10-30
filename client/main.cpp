@@ -8,9 +8,10 @@
 // - 메인 스레드: 키보드 입력을 기다리다가, 보낼 줄을 asio::post로 네트워크 스레드에 넘긴다.
 
 #include "Connector.hpp"
-#include "Packet.hpp"
-#include "PacketHandler.hpp"
+#include "PacketSession.hpp"
+#include "packets/RegisterPackets.hpp"
 #include "PacketWriter.hpp"
+#include "Protocol.hpp"
 #include "Session.hpp"
 
 #include <boost/asio.hpp>
@@ -49,15 +50,16 @@ int main(int argc, char* argv[])
 
 	std::cout << "Connected to " << connector.getEndPoint() << " (empty line to quit)\n";
 
-	// 4. 받기 시작 후 네트워크 스레드에서 이벤트 루프 실행. 받은 패킷은 PacketHandler가 처리한다.
-	auto session = std::make_shared<Session>(std::move(socket),
-		[](const std::shared_ptr<Session>& session, PacketType type, PacketReader& reader) {
-			PacketHandler::instance().handle(session, type, reader);
-		});
+	// 4. 패킷 클래스 등록 (목록은 packets/RegisterPackets.cpp)
+	registerPackets();
+
+	// 5. 받기 시작 후 네트워크 스레드에서 이벤트 루프 실행.
+	// PacketSession이 받은 바이트를 패킷으로 잘라 등록된 패킷 클래스로 넘긴다.
+	auto session = std::make_shared<PacketSession>(std::move(socket));
 	session->start();
 	std::thread networkThread([&ioContext] { ioContext.run(); });
 
-	// 5. 메인 스레드: 입력한 줄을 Chat 패킷으로 만들어 네트워크 스레드로 넘긴다.
+	// 6. 메인 스레드: 입력한 줄을 Chat 패킷으로 만들어 네트워크 스레드로 넘긴다.
 	// asio::post: 함수를 io_context의 할 일 목록에 넣는다. 실제 실행은 run()을 돌리는 네트워크 스레드에서 한다.
 	std::string line;
 	while (std::getline(std::cin, line) && !line.empty() && !session->isClosed()) {
@@ -67,7 +69,7 @@ int main(int argc, char* argv[])
 			continue;
 		}
 
-		PacketWriter writer(PacketType::Chat);
+		PacketWriter writer(PacketId::Chat);
 		writer.writeString(line);
 		std::optional<PacketBuffer> packet = writer.finish();
 		if (!packet) {
@@ -79,7 +81,7 @@ int main(int argc, char* argv[])
 		});
 	}
 
-	// 6. 종료: 닫기도 네트워크 스레드에서 하도록 넘긴다.
+	// 7. 종료: 닫기도 네트워크 스레드에서 하도록 넘긴다.
 	// 소켓이 닫히면 걸려 있던 작업이 끝나고, 할 일이 없어진 run()이 반환해 네트워크 스레드가 끝난다.
 	asio::post(ioContext, [session] { session->close(); });
 	networkThread.join();
