@@ -1,12 +1,12 @@
 // TCP 채팅 서버 (비동기, 싱글 스레드)
 // 스레드 하나가 io_context.run()으로 모든 클라이언트를 동시에 처리한다.
-// 한 클라이언트가 보낸 줄을 접속 중인 모든 클라이언트에게 보낸다(broadcast).
+// 한 클라이언트가 보낸 채팅을 접속 중인 모든 클라이언트에게 보낸다(broadcast).
 //
 // 역할 분리:
 // - Listener: 접속을 받는다.
 // - SessionManager: 세션을 만들고 목록을 관리한다.
-// - Session: 클라이언트 하나와 데이터를 주고받는다.
-// - PacketHandler: 세션이 받은 데이터를 처리한다.
+// - Session: 클라이언트 하나와 패킷을 주고받는다.
+// - PacketHandler: 세션이 받은 패킷을 처리한다.
 
 #include "Listener.hpp"
 #include "PacketHandler.hpp"
@@ -32,10 +32,10 @@ int main()
 	// 비동기 작업이 끝나면 그 콜백을 io_context가 실행한다.
 	asio::io_context ioContext;
 
-	// 2. 받은 데이터 처리 연결: 세션이 받은 줄은 PacketHandler가 처리한다.
+	// 2. 받은 패킷 처리 연결: 세션이 받은 패킷은 PacketHandler가 처리한다.
 	// SessionManager가 PacketHandler를 직접 알지 않도록 여기서 연결해 준다.
-	SessionManager::instance().setMessageHandler([](const std::shared_ptr<Session>& session, std::string line) {
-		PacketHandler::instance().handle(session, std::move(line));
+	SessionManager::instance().setPacketHandler([](const std::shared_ptr<Session>& session, PacketType type, PacketReader& reader) {
+		PacketHandler::instance().handle(session, type, reader);
 	});
 
 	// 3. 서버 소켓 열기: open -> 옵션 -> bind -> listen

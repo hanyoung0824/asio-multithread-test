@@ -1,6 +1,6 @@
 // TCP 채팅 클라이언트
 // 사용법: client [host] [port]   (기본값 127.0.0.1 12345)
-// 입력한 줄을 서버로 보내고, 서버가 보내는 줄(다른 클라이언트의 메시지 포함)을 받는 대로 출력한다.
+// 입력한 줄을 Chat 패킷으로 서버에 보내고, 서버가 보내는 ChatNotify(다른 클라이언트의 메시지 포함)를 받는 대로 출력한다.
 // 빈 줄을 입력하면 종료.
 //
 // 스레드 구성:
@@ -8,12 +8,16 @@
 // - 메인 스레드: 키보드 입력을 기다리다가, 보낼 줄을 asio::post로 네트워크 스레드에 넘긴다.
 
 #include "Connector.hpp"
+#include "Packet.hpp"
+#include "PacketHandler.hpp"
+#include "PacketWriter.hpp"
 #include "Session.hpp"
 
 #include <boost/asio.hpp>
 
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <string>
 #include <thread>
 
@@ -45,16 +49,34 @@ int main(int argc, char* argv[])
 
 	std::cout << "Connected to " << connector.getEndPoint() << " (empty line to quit)\n";
 
-	// 4. 받기 시작 후 네트워크 스레드에서 이벤트 루프 실행
-	auto session = std::make_shared<Session>(std::move(socket));
+	// 4. 받기 시작 후 네트워크 스레드에서 이벤트 루프 실행. 받은 패킷은 PacketHandler가 처리한다.
+	auto session = std::make_shared<Session>(std::move(socket),
+		[](const std::shared_ptr<Session>& session, PacketType type, PacketReader& reader) {
+			PacketHandler::instance().handle(session, type, reader);
+		});
 	session->start();
 	std::thread networkThread([&ioContext] { ioContext.run(); });
 
-	// 5. 메인 스레드: 입력한 줄을 네트워크 스레드로 넘긴다.
+	// 5. 메인 스레드: 입력한 줄을 Chat 패킷으로 만들어 네트워크 스레드로 넘긴다.
 	// asio::post: 함수를 io_context의 할 일 목록에 넣는다. 실제 실행은 run()을 돌리는 네트워크 스레드에서 한다.
 	std::string line;
 	while (std::getline(std::cin, line) && !line.empty() && !session->isClosed()) {
-		asio::post(ioContext, [session, line] { session->send(line + "\n"); });
+		// 서버도 길이를 검사해 넘으면 끊으므로, 보내기 전에 먼저 거른다.
+		if (line.size() > maxChatMessageLength) {
+			std::cerr << "Message too long (max " << maxChatMessageLength << " bytes)\n";
+			continue;
+		}
+
+		PacketWriter writer(PacketType::Chat);
+		writer.writeString(line);
+		std::optional<PacketBuffer> packet = writer.finish();
+		if (!packet) {
+			continue;
+		}
+
+		asio::post(ioContext, [session, packet = std::move(*packet)]() mutable {
+			session->send(std::move(packet));
+		});
 	}
 
 	// 6. 종료: 닫기도 네트워크 스레드에서 하도록 넘긴다.

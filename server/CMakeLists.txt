@@ -9,4 +9,4 @@ add_executable(server
 	PacketHandler.hpp
 	PacketHandler.cpp
 )
-target_link_libraries(server PRIVATE Boost::asio Threads::Threads)
+target_link_libraries(server PRIVATE common Boost::asio Threads::Threads)

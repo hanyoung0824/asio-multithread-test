@@ -4,5 +4,7 @@ add_executable(client
 	Connector.cpp
 	Session.hpp
 	Session.cpp
+	PacketHandler.hpp
+	PacketHandler.cpp
 )
-target_link_libraries(client PRIVATE Boost::asio Threads::Threads)
+target_link_libraries(client PRIVATE common Boost::asio Threads::Threads)

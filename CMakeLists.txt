@@ -18,5 +18,6 @@ if(MSVC)
 	add_compile_options(/utf-8)
 endif()
 
+add_subdirectory(common)
 add_subdirectory(server)
 add_subdirectory(client)

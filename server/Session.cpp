@@ -7,17 +7,10 @@
 namespace asio = boost::asio;
 using asio::ip::tcp;
 
-namespace
-{
-	// 한 줄의 최대 길이. 이보다 길게 '\n' 없이 보내면 연결을 끊는다.
-	// 제한이 없으면 악의적인 클라이언트가 줄바꿈 없이 계속 보내 서버 메모리를 다 쓰게 만들 수 있다.
-	constexpr std::size_t maxLineLength = 1024;
-}
-
-Session::Session(tcp::socket socket, SessionId id, MessageCallback onMessage, CloseCallback onClosed)
+Session::Session(tcp::socket socket, SessionId id, PacketCallback onPacket, CloseCallback onClosed)
 	: m_socket(std::move(socket)),
 	m_id(id),
-	m_onMessage(std::move(onMessage)),
+	m_onPacket(std::move(onPacket)),
 	m_onClosed(std::move(onClosed))
 {
 	boost::system::error_code ec;
@@ -35,10 +28,10 @@ Session::~Session()
 void Session::start()
 {
 	std::cout << "[thread " << std::this_thread::get_id() << "] Client connected: " << m_name << '\n';
-	startRead();
+	startReadHeader();
 }
 
-void Session::send(std::shared_ptr<const std::string> data)
+void Session::send(std::shared_ptr<const PacketBuffer> packet)
 {
 	if (m_closed) {
 		return;
@@ -46,10 +39,10 @@ void Session::send(std::shared_ptr<const std::string> data)
 
 	// 1. 큐에 쌓는다.
 	const bool writing = !m_writeQueue.empty();
-	m_writeQueue.push_back(std::move(data));
+	m_writeQueue.push_back(std::move(packet));
 
 	// 2. 이미 보내는 중이면 onWrite가 이어서 보내므로 여기서는 시작하지 않는다.
-	// 같은 소켓에 async_write를 동시에 두 개 걸면 두 데이터가 섞여 전송될 수 있다.
+	// 같은 소켓에 async_write를 동시에 두 개 걸면 두 패킷이 섞여 전송될 수 있다.
 	if (!writing) {
 		startWrite();
 	}
@@ -62,7 +55,7 @@ void Session::close()
 	}
 	m_closed = true;
 
-	// 소켓을 닫으면 걸려 있던 async_read_until / async_write는 operation_aborted로 끝난다.
+	// 소켓을 닫으면 걸려 있던 async_read / async_write는 operation_aborted로 끝난다.
 	boost::system::error_code ec;
 	m_socket.shutdown(tcp::socket::shutdown_both, ec);
 	m_socket.close(ec);
@@ -73,52 +66,74 @@ void Session::close()
 	}
 }
 
-void Session::startRead()
+void Session::startReadHeader()
 {
-	// async_read_until: '\n'이 나올 때까지 받은 뒤 콜백을 호출한다.
-	// m_readBuffer에 이미 '\n'이 들어 있으면(앞서 여러 줄이 한꺼번에 왔으면) 바로 완료된다.
-	// maxLineLength를 넘도록 '\n'이 없으면 not_found 오류로 끝난다.
-	asio::async_read_until(m_socket, asio::dynamic_buffer(m_readBuffer, maxLineLength), '\n',
-		[self = shared_from_this()](const boost::system::error_code& ec, std::size_t length) {
-			self->onRead(ec, length);
+	// asio::async_read: 버퍼 크기(4바이트)만큼 정확히 다 받은 뒤 콜백을 호출한다.
+	// TCP는 데이터를 나눠서 전달할 수 있지만, async_read가 다 모일 때까지 알아서 이어 받는다.
+	asio::async_read(m_socket, asio::buffer(m_header),
+		[self = shared_from_this()](const boost::system::error_code& ec, std::size_t) {
+			self->onReadHeader(ec);
 		});
 }
 
-void Session::onRead(const boost::system::error_code& ec, std::size_t length)
+void Session::onReadHeader(const boost::system::error_code& ec)
 {
 	if (ec) {
-		if (ec == asio::error::eof) {
-			std::cout << "Client disconnected: " << m_name << '\n';
-		}
-		else if (ec == asio::error::not_found) {
-			std::cerr << "Line too long from " << m_name << ", closing\n";
-		}
-		else if (ec != asio::error::operation_aborted) {
-			std::cerr << "Read error from " << m_name << ": " << ec.message() << '\n';
-		}
+		onReadError(ec);
+		return;
+	}
+
+	// 1. size 검사: 헤더보다 작거나 최대 크기보다 크면 잘못된(또는 악의적인) 패킷이다.
+	const PacketHeader header = parseHeader(m_header);
+	if (header.size < packetHeaderSize || header.size > maxPacketSize) {
+		std::cerr << "Invalid packet size " << header.size << " from " << m_name << ", closing\n";
 		close();
 		return;
 	}
 
-	// 1. 버퍼에서 한 줄을 꺼낸다 ('\n' 제외). '\n' 뒤에 더 받은 데이터는 버퍼에 남겨 다음 줄로 쓴다.
-	std::string line = m_readBuffer.substr(0, length - 1);
-	m_readBuffer.erase(0, length);
+	// 2. 본문(size - 4바이트)을 받는다. 본문이 0바이트여도 async_read는 바로 완료된다.
+	m_bodyType = header.type;
+	m_body.resize(header.size - packetHeaderSize);
+	asio::async_read(m_socket, asio::buffer(m_body),
+		[self = shared_from_this()](const boost::system::error_code& ec, std::size_t) {
+			self->onReadBody(ec);
+		});
+}
 
-	// 2. 처리는 콜백에 맡긴다. 무엇을 할지는 Session이 모른다.
-	if (m_onMessage) {
-		m_onMessage(shared_from_this(), std::move(line));
+void Session::onReadBody(const boost::system::error_code& ec)
+{
+	if (ec) {
+		onReadError(ec);
+		return;
 	}
 
-	// 3. 처리 중에 닫히지 않았으면 바로 다음 줄을 받는다.
+	// 1. 처리는 콜백에 맡긴다. 무엇을 할지는 Session이 모른다.
+	if (m_onPacket) {
+		PacketReader reader(m_body);
+		m_onPacket(shared_from_this(), m_bodyType, reader);
+	}
+
+	// 2. 처리 중에 닫히지 않았으면 바로 다음 패킷을 받는다.
 	if (!m_closed) {
-		startRead();
+		startReadHeader();
 	}
+}
+
+void Session::onReadError(const boost::system::error_code& ec)
+{
+	if (ec == asio::error::eof) {
+		std::cout << "Client disconnected: " << m_name << '\n';
+	}
+	else if (ec != asio::error::operation_aborted) {
+		std::cerr << "Read error from " << m_name << ": " << ec.message() << '\n';
+	}
+	close();
 }
 
 void Session::startWrite()
 {
-	// asio::async_write: 맨 앞 데이터를 전부 보내면 콜백이 호출된다.
-	// 데이터는 큐 안의 shared_ptr가 붙잡고 있으므로 보내는 동안 사라지지 않는다.
+	// asio::async_write: 맨 앞 패킷을 전부 보내면 콜백이 호출된다.
+	// 패킷은 큐 안의 shared_ptr가 붙잡고 있으므로 보내는 동안 사라지지 않는다.
 	asio::async_write(m_socket, asio::buffer(*m_writeQueue.front()),
 		[self = shared_from_this()](const boost::system::error_code& ec, std::size_t length) {
 			self->onWrite(ec, length);
@@ -135,7 +150,7 @@ void Session::onWrite(const boost::system::error_code& ec, std::size_t)
 		return;
 	}
 
-	// 다 보낸 데이터를 빼고, 남은 게 있으면 이어서 보낸다.
+	// 다 보낸 패킷을 빼고, 남은 게 있으면 이어서 보낸다.
 	m_writeQueue.pop_front();
 	if (!m_writeQueue.empty()) {
 		startWrite();
